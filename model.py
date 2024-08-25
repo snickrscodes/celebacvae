@@ -314,7 +314,7 @@ class Decoder(object):
         self.conv1t = Conv2DTranspose(64, 'decoder_conv1t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
         self.conv2t = Conv2DTranspose(128, 'decoder_conv2t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
         self.conv3t = Conv2DTranspose(256, 'decoder_conv3t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
-        self.conv4 = Conv2D(3, 'decoder_conv4', (4, 4), (1, 1), 'SAME', (1, 1), sigmoid)
+        self.conv4 = Conv2D(3, 'decoder_conv4', (4, 4), (1, 1), 'SAME', (1, 1))
         self.layers = [self.dense, self.label_transformer, self.conv1t, self.conv2t, self.conv3t, self.conv4]
 
     def __call__(self, input, labels):
@@ -384,7 +384,7 @@ class CVAE(object):
 
     def generate_images(self, n=10):
         label = tf.cast(tfp.distributions.Bernoulli(probs=0.5).sample(sample_shape=(n, 40)), dtype=tf.float32)
-        image_data = self.decoder(tf.random.normal(shape=[n, self.latent_dim]), label) * 255.0
+        image_data = tf.nn.sigmoid(self.decoder(tf.random.normal(shape=[n, self.latent_dim]), label)) * 255.0
         image_data = tf.transpose(image_data, perm=[0, 2, 3, 1]).numpy()
         num_files = len(os.listdir(IMAGE_DIR))
         count = 0
