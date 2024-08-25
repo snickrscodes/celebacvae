@@ -365,9 +365,11 @@ class CVAE(object):
         with tf.GradientTape() as tape:
             logits, mean, log_var = self(input, labels)
             logits = flatten(logits)
-            bce = tf.math.maximum(logits, 0.0) - logits * flatten(input) + tf.math.log(1.0 + tf.math.exp(-tf.abs(logits)))
-            reconstruction_loss = -tf.reduce_sum(bce)
-            kld_loss = -0.5 * tf.reduce_sum(1 + log_var - tf.square(mean) - tf.math.exp(log_var))
+            bce = tf.nn.sigmoid_cross_entropy_with_logits(flatten(input), logits)
+            # reconstruction_loss = tf.reduce_mean(tf.square(logits - input))
+            # sum over dim then mean over batch
+            reconstruction_loss = tf.reduce_mean(tf.reduce_sum(bce, axis=-1))
+            kld_loss = -0.5 * tf.reduce_mean(tf.reduce_sum(1.0 + log_var - tf.square(mean) - tf.math.exp(log_var), axis=-1))
             loss = reconstruction_loss + kld_loss * self.beta
         variables = self.get_trainable_variables()
         gradients = tape.gradient(loss, variables)
