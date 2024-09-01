@@ -5,10 +5,8 @@ import numpy as np
 import keras
 import os
 import math
-
 CHKPT_DIR = 'C:/Users/saraa/Desktop/image_gen/checkpoints/'
 IMAGE_DIR = 'C:/Users/saraa/Desktop/image_gen/images/'
-
 def lrelu(x):
     return tf.nn.leaky_relu(x, alpha=0.2)
 
@@ -23,6 +21,19 @@ def flatten(x):
         flattened_dim *= shape[i]
     return tf.reshape(x, [-1, flattened_dim])
 
+# @tf.function
+# def norm(input, reduction_axes, training, momentum, epsilon, gamma, beta, moving_mean, moving_variance):
+#     mean, variance = tf.nn.moments(x=input, axes=reduction_axes, keepdims=True)
+#     if training:
+#         moving_mean = moving_mean*momentum+mean*(1.0-momentum)
+#         moving_variance = moving_variance*momentum+variance*(1.0-momentum)
+#     else:
+#         mean = moving_mean
+#         variance = moving_variance
+#     stddev = tf.sqrt(variance + epsilon)
+#     x_norm = (input - mean) / stddev
+#     return x_norm * gamma + beta
+
 class Linear(object):
     def __init__(self, units: int, name: str, activation=None, input_shape=None):
         self.units = units
@@ -31,7 +42,7 @@ class Linear(object):
         self.weight = None
         self.bias = None
         if input_shape is not None:
-            self.create_dense_vars(input_shape)
+            self.create_vars(input_shape)
 
     def __call__(self, input: tf.Tensor):
         if self.weight is None or self.bias is None:
@@ -195,38 +206,31 @@ class BatchNorm(object):
         self.gamma, self.beta, self.moving_mean, self.moving_variance = None, None, None, None
         if input_shape is not None:
             self.create_vars(input_shape)
-
+    
     def __call__(self, input: tf.Tensor):
         if self.gamma is None or self.beta is None:
             self.create_vars(input.shape.as_list())
-        return self.batch_norm(input)
-    
-    @tf.function
-    def batch_norm(self, input: tf.Tensor, training: bool, name: str, axis=-1):
         shape = input.shape.as_list()
         reduction_axes = list(range(len(shape)))
         del reduction_axes[self.axis]
         mean, variance = tf.nn.moments(x=input, axes=reduction_axes, keepdims=True)
-        # works because we use @tf.function and autograph happens
-        if training:
-            self.moving_mean = self.moving_mean*self.momentum+mean*(1.0-self.momentum)
-            self.moving_variance = self.moving_variance*self.momentum+variance*(1.0-self.momentum)
+        if self.training:
+            self.moving_mean.assign(self.moving_mean*self.momentum+mean*(1.0-self.momentum))
+            self.moving_variance.assign(self.moving_variance*self.momentum+variance*(1.0-self.momentum))
         else:
             mean = self.moving_mean
             variance = self.moving_variance
-
         stddev = tf.sqrt(variance + self.epsilon)
-        input = (input - mean) / stddev
-        input = input * self.gamma + self.beta
-        return input
+        x_norm = (input - mean) / stddev
+        return x_norm * self.gamma + self.beta
     
-    def create_vars(self, input_shape: list | tuple, name: str):
+    def create_vars(self, input_shape: list | tuple):
         param_shape = [1] * len(input_shape)
         param_shape[self.axis] = input_shape[self.axis]
-        self.gamma = tf.Variable(tf.ones(param_shape), name=name+"_gamma", trainable=True)
-        self.beta = tf.Variable(tf.zeros(param_shape), name=name+"_beta", trainable=True)
-        self.moving_mean = tf.Variable(tf.zeros(param_shape), name=name+"_moving_mean", trainable=False)
-        self.moving_variance = tf.Variable(tf.ones(param_shape), name=name+"_moving_variance", trainable=False)
+        self.gamma = tf.Variable(tf.ones(param_shape), name=self.name+"_gamma", trainable=True)
+        self.beta = tf.Variable(tf.zeros(param_shape), name=self.name+"_beta", trainable=True)
+        self.moving_mean = tf.Variable(tf.zeros(param_shape), name=self.name+"_moving_mean", trainable=False)
+        self.moving_variance = tf.Variable(tf.ones(param_shape), name=self.name+"_moving_variance", trainable=False)
 
     def get_variables(self) -> list:
         return [self.gamma, self.beta, self.moving_mean, self.moving_variance]
@@ -237,9 +241,9 @@ class BatchNorm(object):
     def load_variables(self, vars: dict):
         for name, var in vars.items():
             if self.name+"_gamma" in name:
-                self.weight = var
+                self.gamma = var
             elif self.name+"_beta" in name:
-                self.bias = var
+                self.beta = var
             elif self.name+"_moving_mean" in name:
                 self.moving_mean = var
             elif self.name+"_moving_variance" in name:
@@ -276,16 +280,22 @@ class Adam(object):
 class Encoder(object):
     def __init__(self, latent_dim=2):
         self.latent_dim = latent_dim
-        self.conv1 = Conv2D(32, 'encoder_conv1', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
-        self.conv2 = Conv2D(64, 'encoder_conv2', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
+        self.conv1 = Conv2D(64, 'encoder_conv1', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
+        self.bn1 = BatchNorm(axis=1, name='encoder_bn1') # channel dimension
+        self.conv2 = Conv2D(128, 'encoder_conv2', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
+        self.bn2 = BatchNorm(axis=1, name='encoder_bn2') # channel dimension
         self.conv3 = Conv2D(128, 'encoder_conv3', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
+        self.bn3 = BatchNorm(axis=1, name='encoder_bn3') # channel dimension
         self.dense = Linear(2*self.latent_dim, 'encoder_dense') # outputs latent_dim dimensional vectors of mean and log variance of latent distribution
-        self.layers = [self.conv1, self.conv2, self.conv3, self.dense]
+        self.layers = [self.conv1, self.bn1, self.conv2, self.bn2, self.conv3, self.bn3, self.dense]
 
     def __call__(self, input):
         x = self.conv1(input)
+        x = self.bn1(x)
         x = self.conv2(x)
+        x = self.bn2(x)
         x = self.conv3(x)
+        x = self.bn3(x)
         x = flatten(x)
         x = self.dense(x)
         return x
@@ -309,21 +319,27 @@ class Encoder(object):
 class Decoder(object):
     def __init__(self, latent_dim=2):
         self.latent_dim = latent_dim
-        self.label_transformer = Linear(self.latent_dim, 'decoder_label_transformer', lrelu) # 218//8 * 178//8 * 64, because transposed convolutions upsample by factor of 2
+        self.label_transformer = Linear(self.latent_dim, 'decoder_label_transformer', lrelu)
         self.dense = Linear(8*8*128, 'decoder_dense', lrelu)
-        self.conv1t = Conv2DTranspose(64, 'decoder_conv1t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
-        self.conv2t = Conv2DTranspose(128, 'decoder_conv2t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
+        self.conv1t = Conv2DTranspose(128, 'decoder_conv1t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
+        self.bn1 = BatchNorm(axis=1, name='decoder_bn1') # channel dimension
+        self.conv2t = Conv2DTranspose(256, 'decoder_conv2t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
+        self.bn2 = BatchNorm(axis=1, name='decoder_bn2')
         self.conv3t = Conv2DTranspose(256, 'decoder_conv3t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
-        self.conv4 = Conv2D(3, 'decoder_conv4', (4, 4), (1, 1), 'SAME', (1, 1))
-        self.layers = [self.dense, self.label_transformer, self.conv1t, self.conv2t, self.conv3t, self.conv4]
+        self.bn3 = BatchNorm(axis=1, name='decoder_bn3')
+        self.conv4 = Conv2D(3, 'decoder_conv4', (5, 5), (1, 1), 'SAME', (1, 1), tf.nn.sigmoid)
+        self.layers = [self.dense, self.label_transformer, self.conv1t, self.bn1, self.conv2t, self.bn2, self.conv3t, self.bn3, self.conv4]
 
     def __call__(self, input, labels):
         x = input + self.label_transformer(labels)
         x = self.dense(x)
         x = tf.reshape(x, shape=[-1, 128, 8, 8])
         x = self.conv1t(x)
+        x = self.bn1(x)
         x = self.conv2t(x)
+        x = self.bn2(x)
         x = self.conv3t(x)
+        x = self.bn3(x)
         x = self.conv4(x)
         return x
     
@@ -344,13 +360,13 @@ class Decoder(object):
             layer.load_variables(vars)
 
 class CVAE(object):
-    def __init__(self, latent_dim=2, beta=1.0e-5):
+    def __init__(self, latent_dim=2, beta=4.0e-3):
         self.latent_dim = latent_dim
         self.encoder = Encoder(self.latent_dim)
         self.decoder = Decoder(self.latent_dim)
         self.steps = 0
         self.beta = beta # beta parameter used to encourage creativity
-        self.optimizer = Adam(lr=0.0001, beta_1=0.9, beta_2=0.999, epsilon=1.0e-7)
+        self.optimizer = Adam(lr=0.001, beta_1=0.5, beta_2=0.999, epsilon=1.0e-7)
 
     def __call__(self, input, labels):
         mean, log_var = tf.split(self.encoder(input), num_or_size_splits=2, axis=-1)
@@ -364,11 +380,18 @@ class CVAE(object):
     def train(self, input, labels):
         with tf.GradientTape() as tape:
             logits, mean, log_var = self(input, labels)
-            logits = flatten(logits)
-            bce = tf.nn.sigmoid_cross_entropy_with_logits(flatten(input), logits)
-            # reconstruction_loss = tf.reduce_mean(tf.square(logits - input))
-            # sum over dim then mean over batch
-            reconstruction_loss = tf.reduce_mean(tf.reduce_sum(bce, axis=-1))
+            if tf.reduce_any(tf.math.is_nan(logits)):
+                print('logits diverged')
+            if tf.reduce_any(tf.math.is_nan(mean)):
+                print('mean diverged')
+            if tf.reduce_any(tf.math.is_nan(log_var)):
+                print('variance diverged')
+            # this is for binary data
+            # bce = tf.nn.sigmoid_cross_entropy_with_logits(flatten(input), flatten(logits))
+            # reconstruction_loss = tf.reduce_mean(tf.reduce_sum(bce, axis=-1))
+            # but we have continuous data
+            reconstruction_loss = tf.reduce_mean(tf.square(logits - input))
+            # sum over latent dim then mean over batch
             kld_loss = -0.5 * tf.reduce_mean(tf.reduce_sum(1.0 + log_var - tf.square(mean) - tf.math.exp(log_var), axis=-1))
             loss = reconstruction_loss + kld_loss * self.beta
         variables = self.get_trainable_variables()
@@ -382,16 +405,18 @@ class CVAE(object):
         max_vals = tf.reduce_max(image_data, axis=[1, 2, 3], keepdims=True)
         return (image_data - min_vals) / (max_vals - min_vals)
 
-    def generate_images(self, n=10):
-        label = tf.cast(tfp.distributions.Bernoulli(probs=0.5).sample(sample_shape=(n, 40)), dtype=tf.float32)
-        image_data = tf.nn.sigmoid(self.decoder(tf.random.normal(shape=[n, self.latent_dim]), label)) * 255.0
-        image_data = tf.transpose(image_data, perm=[0, 2, 3, 1]).numpy()
-        num_files = len(os.listdir(IMAGE_DIR))
+    def write_images(self, images, filename='image', eps=1.0e-7):
+        image_data = (tf.transpose(tf.clip_by_value(images, 0+eps, 1-eps), perm=[0, 2, 3, 1]).numpy() * 255.0).astype(np.uint8)
         count = 0
         for image in image_data:
             image = Image.fromarray(image, mode="RGB")
-            image.save(IMAGE_DIR+f'image{num_files+count}.jpg')
+            image.save(IMAGE_DIR+filename+str(count)+'.jpg')
             count += 1
+
+    def generate_images(self, n=10, name='image'):
+        label = tf.cast(tfp.distributions.Bernoulli(probs=0.5).sample(sample_shape=(n, 40)), dtype=tf.float32)
+        image_data = self.decoder(tf.random.normal(shape=[n, self.latent_dim]), label)
+        self.write_images(image_data, name)
 
     def save_checkpoint(self, dir=CHKPT_DIR):
         checkpoint = tf.train.Checkpoint(**self.get_vars_dict())
@@ -401,7 +426,7 @@ class CVAE(object):
         # gets all the variables in the model
         vars = {}
         for variable in self.get_all_variables():
-            vars[variable.name] = variable
+                vars[variable.name] = variable
         return vars
     
     def get_trainable_variables(self) -> list:
