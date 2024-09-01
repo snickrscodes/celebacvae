@@ -197,12 +197,13 @@ class Conv2DTranspose(object):
 
 class BatchNorm(object):
     # training should always be true upon init
-    def __init__(self, axis: int, name: str, momentum=0.99, epsilon=1.0e-7, training=True, input_shape=None):
+    def __init__(self, axis: int, name: str, momentum=0.99, epsilon=1.0e-7, activation=None, input_shape=None):
         self.axis = axis
         self.momentum = momentum
         self.epsilon = epsilon
         self.name = name
-        self.training = training
+        self.training = True
+        self.activation = activation if activation is not None else lambda x: x
         self.gamma, self.beta, self.moving_mean, self.moving_variance = None, None, None, None
         if input_shape is not None:
             self.create_vars(input_shape)
@@ -222,7 +223,7 @@ class BatchNorm(object):
             variance = self.moving_variance
         stddev = tf.sqrt(variance + self.epsilon)
         x_norm = (input - mean) / stddev
-        return x_norm * self.gamma + self.beta
+        return self.activation(x_norm * self.gamma + self.beta)
     
     def create_vars(self, input_shape: list | tuple):
         param_shape = [1] * len(input_shape)
@@ -280,12 +281,12 @@ class Adam(object):
 class Encoder(object):
     def __init__(self, latent_dim=2):
         self.latent_dim = latent_dim
-        self.conv1 = Conv2D(64, 'encoder_conv1', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
-        self.bn1 = BatchNorm(axis=1, name='encoder_bn1') # channel dimension
-        self.conv2 = Conv2D(128, 'encoder_conv2', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
-        self.bn2 = BatchNorm(axis=1, name='encoder_bn2') # channel dimension
-        self.conv3 = Conv2D(128, 'encoder_conv3', (4, 4), (2, 2), 'SAME', (1, 1), lrelu)
-        self.bn3 = BatchNorm(axis=1, name='encoder_bn3') # channel dimension
+        self.conv1 = Conv2D(64, 'encoder_conv1', (4, 4), (2, 2), 'SAME', (1, 1))
+        self.bn1 = BatchNorm(axis=1, name='encoder_bn1', activation=tf.nn.relu) # channel dimension
+        self.conv2 = Conv2D(128, 'encoder_conv2', (4, 4), (2, 2), 'SAME', (1, 1))
+        self.bn2 = BatchNorm(axis=1, name='encoder_bn2', activation=tf.nn.relu) # channel dimension
+        self.conv3 = Conv2D(128, 'encoder_conv3', (4, 4), (2, 2), 'SAME', (1, 1))
+        self.bn3 = BatchNorm(axis=1, name='encoder_bn3', activation=tf.nn.relu) # channel dimension
         self.dense = Linear(2*self.latent_dim, 'encoder_dense') # outputs latent_dim dimensional vectors of mean and log variance of latent distribution
         self.layers = [self.conv1, self.bn1, self.conv2, self.bn2, self.conv3, self.bn3, self.dense]
 
@@ -319,16 +320,16 @@ class Encoder(object):
 class Decoder(object):
     def __init__(self, latent_dim=2):
         self.latent_dim = latent_dim
-        self.label_transformer = Linear(self.latent_dim, 'decoder_label_transformer', lrelu)
+        self.label_transformer = Linear(self.latent_dim, 'decoder_label_transformer')
         self.dense = Linear(8*8*128, 'decoder_dense', lrelu)
-        self.conv1t = Conv2DTranspose(128, 'decoder_conv1t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
-        self.bn1 = BatchNorm(axis=1, name='decoder_bn1') # channel dimension
-        self.conv2t = Conv2DTranspose(256, 'decoder_conv2t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
-        self.bn2 = BatchNorm(axis=1, name='decoder_bn2')
-        self.conv3t = Conv2DTranspose(256, 'decoder_conv3t', (4, 4), None, (2, 2), 'SAME', (1, 1), lrelu)
-        self.bn3 = BatchNorm(axis=1, name='decoder_bn3')
-        self.conv4 = Conv2D(3, 'decoder_conv4', (5, 5), (1, 1), 'SAME', (1, 1), tf.nn.sigmoid)
-        self.layers = [self.dense, self.label_transformer, self.conv1t, self.bn1, self.conv2t, self.bn2, self.conv3t, self.bn3, self.conv4]
+        self.conv1t = Conv2DTranspose(128, 'decoder_conv1t', (4, 4), None, (2, 2), 'SAME', (1, 1))
+        self.bn1 = BatchNorm(axis=1, name='decoder_bn1', activation=tf.nn.relu) # channel dimension
+        self.conv2t = Conv2DTranspose(256, 'decoder_conv2t', (4, 4), None, (2, 2), 'SAME', (1, 1))
+        self.bn2 = BatchNorm(axis=1, name='decoder_bn2', activation=tf.nn.relu)
+        self.conv3t = Conv2DTranspose(256, 'decoder_conv3t', (4, 4), None, (2, 2), 'SAME', (1, 1))
+        self.bn3 = BatchNorm(axis=1, name='decoder_bn3', activation=tf.nn.relu)
+        self.conv4t = Conv2DTranspose(3, 'decoder_conv4t', (5, 5), None, (1, 1), 'SAME', (1, 1), tf.nn.sigmoid)
+        self.layers = [self.dense, self.label_transformer, self.conv1t, self.bn1, self.conv2t, self.bn2, self.conv3t, self.bn3, self.conv4t]
 
     def __call__(self, input, labels):
         x = input + self.label_transformer(labels)
@@ -340,7 +341,7 @@ class Decoder(object):
         x = self.bn2(x)
         x = self.conv3t(x)
         x = self.bn3(x)
-        x = self.conv4(x)
+        x = self.conv4t(x)
         return x
     
     def get_trainable_variables(self) -> list:
@@ -370,6 +371,7 @@ class CVAE(object):
 
     def __call__(self, input, labels):
         mean, log_var = tf.split(self.encoder(input), num_or_size_splits=2, axis=-1)
+        log_var = tf.nn.softplus(log_var)
         # reparameterization trick
         eps = tf.random.normal(shape=mean.shape) # mean and stddev are 0 and 1
         # multiply by 0.5 turns log variance into log std by laws of logs
